@@ -51,6 +51,12 @@ router.post('/sync', async (req, res) => {
             const senderId = certificate ? certificate.user_id : tx.sender_device_id;
 
             // Record transaction
+            if (!tx.sender_signature) {
+                console.warn(`[Sync] Skipping transaction ${tx.transaction_id} - missing sender_signature`);
+                results.push(tx.transaction_id); // Still mark as processed so client clears it
+                continue;
+            }
+
             const { error: insertTxError } = await supabase
                 .from('transactions')
                 .insert({
