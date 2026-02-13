@@ -127,24 +127,40 @@ router.post('/sync', async (req, res) => {
             results.push(tx.transaction_id);
         }
 
-        // 3. Refund Unspent Portion of the Certificate
+        // 3. Handle Unspent Portion (Keep the Change)
         let unspent = 0;
+        let newCertificate = null;
+
         if (certificate) {
             unspent = certificate.tip_wallet_balance - totalSpent;
             if (unspent > 0) {
-                const { data: user, error: fetchUserError } = await supabase
-                    .from('users')
-                    .select('balance')
-                    .eq('id', certificate.user_id)
-                    .single();
+                // Generate a NEW certificate for the unspent amount
+                // This allows the user to keep funds offline ("Change")
+                const timestamp = new Date().toISOString();
+                const nonce = Math.floor(Math.random() * 1000000000).toString(); // Simple nonce
+                const expiration = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(); // 30 days
 
-                if (fetchUserError) throw fetchUserError;
+                // Construct certificate data string
+                const certData = [
+                    certificate.user_id,
+                    certificate.device_id,
+                    unspent,
+                    timestamp,
+                    nonce,
+                    expiration
+                ].join('|');
 
-                const newBalance = (user.balance || 0) + unspent;
-                await supabase
-                    .from('users')
-                    .update({ balance: newBalance })
-                    .eq('id', certificate.user_id);
+                const signature = CryptoService.sign(certData);
+
+                newCertificate = {
+                    user_id: certificate.user_id,
+                    device_id: certificate.device_id,
+                    tip_wallet_balance: unspent,
+                    timestamp,
+                    nonce,
+                    expiration,
+                    signature
+                };
             }
         }
 
@@ -158,7 +174,7 @@ router.post('/sync', async (req, res) => {
         res.json({
             status: 'ok',
             processed: results,
-            refunded: unspent,
+            new_certificate: newCertificate, // Return the change certificate
             total_spent: totalSpent,
             balance: finalUser ? finalUser.balance : 0
         });
