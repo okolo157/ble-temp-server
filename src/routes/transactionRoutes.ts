@@ -122,55 +122,50 @@ router.post('/sync', async (req, res) => {
                         });
                 }
             }
-            balance: tx.amount,
-                public_key: 'PENDING_INITIALIZATION'
-        });
-                }
-            }
 
-totalSpent += tx.amount;
-results.push(tx.transaction_id);
+            totalSpent += tx.amount;
+            results.push(tx.transaction_id);
         }
 
-// 3. Refund Unspent Portion of the Certificate
-let unspent = 0;
-if (certificate) {
-    unspent = certificate.tip_wallet_balance - totalSpent;
-    if (unspent > 0) {
-        const { data: user, error: fetchUserError } = await supabase
+        // 3. Refund Unspent Portion of the Certificate
+        let unspent = 0;
+        if (certificate) {
+            unspent = certificate.tip_wallet_balance - totalSpent;
+            if (unspent > 0) {
+                const { data: user, error: fetchUserError } = await supabase
+                    .from('users')
+                    .select('balance')
+                    .eq('id', certificate.user_id)
+                    .single();
+
+                if (fetchUserError) throw fetchUserError;
+
+                const newBalance = (user.balance || 0) + unspent;
+                await supabase
+                    .from('users')
+                    .update({ balance: newBalance })
+                    .eq('id', certificate.user_id);
+            }
+        }
+
+        const syncingUserId = certificate ? certificate.user_id : user_id;
+        const { data: finalUser, error: finalUserError } = await supabase
             .from('users')
             .select('balance')
-            .eq('id', certificate.user_id)
+            .eq('id', syncingUserId)
             .single();
 
-        if (fetchUserError) throw fetchUserError;
-
-        const newBalance = (user.balance || 0) + unspent;
-        await supabase
-            .from('users')
-            .update({ balance: newBalance })
-            .eq('id', certificate.user_id);
-    }
-}
-
-const syncingUserId = certificate ? certificate.user_id : user_id;
-const { data: finalUser, error: finalUserError } = await supabase
-    .from('users')
-    .select('balance')
-    .eq('id', syncingUserId)
-    .single();
-
-res.json({
-    status: 'ok',
-    processed: results,
-    refunded: unspent,
-    total_spent: totalSpent,
-    balance: finalUser ? finalUser.balance : 0
-});
+        res.json({
+            status: 'ok',
+            processed: results,
+            refunded: unspent,
+            total_spent: totalSpent,
+            balance: finalUser ? finalUser.balance : 0
+        });
     } catch (err) {
-    console.error('Sync error:', err);
-    res.status(500).json({ error: 'Sync failed' });
-}
+        console.error('Sync error:', err);
+        res.status(500).json({ error: 'Sync failed' });
+    }
 });
 
 export default router;
