@@ -71,12 +71,21 @@ router.post('/sync', async (req, res) => {
                 continue;
             }
 
+            // Record transaction
+            const receiverId = tx.receiver_user_id || tx.receiver_device_id || 'unknown';
+
+            if (!tx.sender_signature) {
+                console.warn(`[Sync] Skipping transaction ${tx.transaction_id} - missing sender_signature`);
+                results.push(tx.transaction_id); // Still mark as processed so client clears it
+                continue;
+            }
+
             const { error: insertTxError } = await supabase
                 .from('transactions')
                 .insert({
                     id: tx.transaction_id,
                     sender_id: senderId,
-                    receiver_id: tx.receiver_device_id || 'unknown',
+                    receiver_id: receiverId,
                     amount: tx.amount,
                     signature: tx.sender_signature,
                     payload: tx // Store the full object (Supabase 'jsonb' column recommended)
@@ -85,13 +94,13 @@ router.post('/sync', async (req, res) => {
             if (insertTxError) throw insertTxError;
 
             // Increment receiver's balance
-            if (tx.receiver_device_id) {
+            if (receiverId && receiverId !== 'unknown') {
                 // We need to fetch and increment as Supabase doesn't have a direct "increment" method via RPC or direct call without a custom function
                 // Alternative: Use an RPC call if the user creates a function, but for now we'll do fetch-then-update
                 const { data: receiver, error: fetchReceiverError } = await supabase
                     .from('users')
                     .select('balance')
-                    .eq('id', tx.receiver_device_id)
+                    .eq('id', receiverId)
                     .single();
 
                 if (fetchReceiverError && fetchReceiverError.code !== 'PGRST116') throw fetchReceiverError;
@@ -101,62 +110,67 @@ router.post('/sync', async (req, res) => {
                     await supabase
                         .from('users')
                         .update({ balance: newBalance })
-                        .eq('id', tx.receiver_device_id);
+                        .eq('id', receiverId);
                 } else {
                     // Create receiver if they don't exist
                     await supabase
                         .from('users')
                         .insert({
-                            id: tx.receiver_device_id,
+                            id: receiverId,
                             balance: tx.amount,
                             public_key: 'PENDING_INITIALIZATION'
                         });
                 }
             }
-
-            totalSpent += tx.amount;
-            results.push(tx.transaction_id);
-        }
-
-        // 3. Refund Unspent Portion of the Certificate
-        let unspent = 0;
-        if (certificate) {
-            unspent = certificate.tip_wallet_balance - totalSpent;
-            if (unspent > 0) {
-                const { data: user, error: fetchUserError } = await supabase
-                    .from('users')
-                    .select('balance')
-                    .eq('id', certificate.user_id)
-                    .single();
-
-                if (fetchUserError) throw fetchUserError;
-
-                const newBalance = (user.balance || 0) + unspent;
-                await supabase
-                    .from('users')
-                    .update({ balance: newBalance })
-                    .eq('id', certificate.user_id);
+            balance: tx.amount,
+                public_key: 'PENDING_INITIALIZATION'
+        });
+                }
             }
+
+totalSpent += tx.amount;
+results.push(tx.transaction_id);
         }
 
-        const syncingUserId = certificate ? certificate.user_id : user_id;
-        const { data: finalUser, error: finalUserError } = await supabase
+// 3. Refund Unspent Portion of the Certificate
+let unspent = 0;
+if (certificate) {
+    unspent = certificate.tip_wallet_balance - totalSpent;
+    if (unspent > 0) {
+        const { data: user, error: fetchUserError } = await supabase
             .from('users')
             .select('balance')
-            .eq('id', syncingUserId)
+            .eq('id', certificate.user_id)
             .single();
 
-        res.json({
-            status: 'ok',
-            processed: results,
-            refunded: unspent,
-            total_spent: totalSpent,
-            balance: finalUser ? finalUser.balance : 0
-        });
-    } catch (err) {
-        console.error('Sync error:', err);
-        res.status(500).json({ error: 'Sync failed' });
+        if (fetchUserError) throw fetchUserError;
+
+        const newBalance = (user.balance || 0) + unspent;
+        await supabase
+            .from('users')
+            .update({ balance: newBalance })
+            .eq('id', certificate.user_id);
     }
+}
+
+const syncingUserId = certificate ? certificate.user_id : user_id;
+const { data: finalUser, error: finalUserError } = await supabase
+    .from('users')
+    .select('balance')
+    .eq('id', syncingUserId)
+    .single();
+
+res.json({
+    status: 'ok',
+    processed: results,
+    refunded: unspent,
+    total_spent: totalSpent,
+    balance: finalUser ? finalUser.balance : 0
+});
+    } catch (err) {
+    console.error('Sync error:', err);
+    res.status(500).json({ error: 'Sync failed' });
+}
 });
 
 export default router;
