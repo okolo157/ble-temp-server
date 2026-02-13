@@ -37,6 +37,10 @@ router.post('/sync', async (req, res) => {
         let totalSpent = 0;
 
         for (const tx of transactions) {
+            // Always count toward totalSpent if part of this sync session
+            totalSpent += tx.amount;
+            results.push(tx.transaction_id);
+
             // Check if already processed
             const { data: existing, error: checkError } = await supabase
                 .from('transactions')
@@ -48,37 +52,21 @@ router.post('/sync', async (req, res) => {
             if (existing) continue;
 
             // Determine sender_id
-            // 1. Explicit sender_user_id in transaction (Best)
-            // 2. Certificate user_id (Only if syncing user IS the sender)
-            // 3. Fallback to device_id (Will fail FK if not mapped, but better than wrong user)
             let senderId = tx.sender_user_id;
-
             if (!senderId && certificate) {
-                // Only use certificate user_id if the device ID matches
                 if (certificate.device_id === tx.sender_device_id) {
                     senderId = certificate.user_id;
                 }
             }
-
-            if (!senderId) {
-                senderId = tx.sender_device_id;
-            }
+            if (!senderId) senderId = tx.sender_device_id;
 
             // Record transaction
             if (!tx.sender_signature) {
-                console.warn(`[Sync] Skipping transaction ${tx.transaction_id} - missing sender_signature`);
-                results.push(tx.transaction_id); // Still mark as processed so client clears it
+                console.warn(`[Sync] Skipping DB record for ${tx.transaction_id} - missing sender_signature`);
                 continue;
             }
 
-            // Record transaction
             const receiverId = tx.receiver_user_id || tx.receiver_device_id || 'unknown';
-
-            if (!tx.sender_signature) {
-                console.warn(`[Sync] Skipping transaction ${tx.transaction_id} - missing sender_signature`);
-                results.push(tx.transaction_id); // Still mark as processed so client clears it
-                continue;
-            }
 
             const { error: insertTxError } = await supabase
                 .from('transactions')
@@ -88,15 +76,13 @@ router.post('/sync', async (req, res) => {
                     receiver_id: receiverId,
                     amount: tx.amount,
                     signature: tx.sender_signature,
-                    payload: tx // Store the full object (Supabase 'jsonb' column recommended)
+                    payload: tx
                 });
 
             if (insertTxError) throw insertTxError;
 
             // Increment receiver's balance
             if (receiverId && receiverId !== 'unknown') {
-                // We need to fetch and increment as Supabase doesn't have a direct "increment" method via RPC or direct call without a custom function
-                // Alternative: Use an RPC call if the user creates a function, but for now we'll do fetch-then-update
                 const { data: receiver, error: fetchReceiverError } = await supabase
                     .from('users')
                     .select('balance')
@@ -112,7 +98,6 @@ router.post('/sync', async (req, res) => {
                         .update({ balance: newBalance })
                         .eq('id', receiverId);
                 } else {
-                    // Create receiver if they don't exist
                     await supabase
                         .from('users')
                         .insert({
@@ -122,9 +107,6 @@ router.post('/sync', async (req, res) => {
                         });
                 }
             }
-
-            totalSpent += tx.amount;
-            results.push(tx.transaction_id);
         }
 
         // 3. Handle Unspent Portion (Keep the Change)
