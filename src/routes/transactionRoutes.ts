@@ -48,7 +48,21 @@ router.post('/sync', async (req, res) => {
             if (existing) continue;
 
             // Determine sender_id
-            const senderId = certificate ? certificate.user_id : tx.sender_device_id;
+            // 1. Explicit sender_user_id in transaction (Best)
+            // 2. Certificate user_id (Only if syncing user IS the sender)
+            // 3. Fallback to device_id (Will fail FK if not mapped, but better than wrong user)
+            let senderId = tx.sender_user_id;
+
+            if (!senderId && certificate) {
+                // Only use certificate user_id if the device ID matches
+                if (certificate.device_id === tx.sender_device_id) {
+                    senderId = certificate.user_id;
+                }
+            }
+
+            if (!senderId) {
+                senderId = tx.sender_device_id;
+            }
 
             // Record transaction
             if (!tx.sender_signature) {
